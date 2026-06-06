@@ -50,7 +50,7 @@ def load_tickers():
 def get_data(ticker):
     df = yf.download(
         ticker,
-        period="1y",
+        period="2y",
         interval="1d",
         auto_adjust=True,
         progress=False
@@ -84,7 +84,7 @@ def analyze_stock(ticker, ihsg_return_6m):
     close = df["Close"].iloc[-1]
     volume_today = df["Volume"].iloc[-1]
 
-    high_52w = df["High"].rolling(252).max().iloc[-1]
+    high_52w = df["High"].tail(252).max()
     strength_52w = close / high_52w
 
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
@@ -128,7 +128,16 @@ def analyze_stock(ticker, ihsg_return_6m):
             "volume_active": volume_active,
             "score": round(score, 1)
         }
-
+        
+    print(
+        f"{ticker} CHECK | "
+        f"52W: {passed_52w} ({strength_52w:.1%}) | "
+        f"EMA: {passed_ema} | "
+        f"RS: {passed_rs} "
+        f"({stock_return_6m:.1%} vs IHSG {ihsg_return_6m:.1%}) | "
+        f"VOL: {volume_ratio:.2f}x"
+    )
+    
     return None
 
 
