@@ -15,6 +15,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 MIN_52W_STRENGTH = 0.80
+MIN_AVG_VALUE_20D = 10_000_000_000  # Rp10 miliar
 
 
 # =========================
@@ -34,7 +35,10 @@ def send_telegram(message: str):
         "parse_mode": "HTML"
     }
 
-    requests.post(url, data=payload, timeout=20)
+    response = requests.post(url, data=payload, timeout=20)
+
+    print(f"Telegram status: {response.status_code}")
+    print(response.text)
 
 
 # =========================
@@ -101,15 +105,15 @@ def analyze_stock(ticker, ihsg_return_6m):
     volume_ratio = volume_today / avg_volume_20d if avg_volume_20d > 0 else 0
     volume_active = volume_today > avg_volume_20d
 
+    value_today = close * volume_today
+    avg_value_20d = (df["Close"] * df["Volume"]).rolling(20).mean().iloc[-1]
+
     passed_52w = strength_52w >= MIN_52W_STRENGTH
     passed_ema = ema50 > ema150 > ema200
     passed_rs = stock_return_6m > ihsg_return_6m
+    passed_liquidity = avg_value_20d >= MIN_AVG_VALUE_20D
 
-    # Filter wajib baru:
-    # 1. Close / High 52W >= 0.80
-    # 2. EMA50 > EMA150 > EMA200
-    # 3. Return 6 bulan > IHSG
-    if passed_52w and passed_ema and passed_rs:
+    if passed_52w and passed_ema and passed_rs and passed_liquidity:
         score = (
             min(strength_52w / 1.0, 1) * 35 +
             35 +
@@ -126,18 +130,22 @@ def analyze_stock(ticker, ihsg_return_6m):
             "ihsg_return_6m": ihsg_return_6m,
             "volume_ratio": volume_ratio,
             "volume_active": volume_active,
+            "value_today": value_today,
+            "avg_value_20d": avg_value_20d,
             "score": round(score, 1)
         }
-        
+
     print(
         f"{ticker} CHECK | "
         f"52W: {passed_52w} ({strength_52w:.1%}) | "
         f"EMA: {passed_ema} | "
         f"RS: {passed_rs} "
         f"({stock_return_6m:.1%} vs IHSG {ihsg_return_6m:.1%}) | "
+        f"LIQ: {passed_liquidity} "
+        f"(Avg Rp{avg_value_20d / 1_000_000_000:.1f}B) | "
         f"VOL: {volume_ratio:.2f}x"
     )
-    
+
     return None
 
 
@@ -188,7 +196,8 @@ def main():
             f"Kriteria Wajib:\n"
             f"✅ Close / High 52W ≥ 0.80\n"
             f"✅ EMA50 > EMA150 > EMA200\n"
-            f"✅ Return 6 bulan > IHSG\n\n"
+            f"✅ Return 6 bulan > IHSG\n"
+            f"✅ Avg transaksi 20D > Rp10 miliar\n\n"
             f"Info Tambahan:\n"
             f"• Volume Ratio = Volume hari ini / Avg Volume 20D"
         )
@@ -201,13 +210,14 @@ def main():
         f"Kriteria Wajib:\n"
         f"✅ Close / High 52W ≥ 0.80\n"
         f"✅ EMA50 > EMA150 > EMA200\n"
-        f"✅ Return 6 bulan > IHSG\n\n"
+        f"✅ Return 6 bulan > IHSG\n"
+        f"✅ Avg transaksi 20D > Rp10 miliar\n\n"
         f"Info Tambahan:\n"
         f"• Volume Ratio = Volume hari ini / Avg Volume 20D\n\n"
         f"🏆 <b>Top Candidates:</b>\n"
     )
 
-    for i, r in enumerate(results[:20], start=1):
+    for i, r in enumerate(results[:15], start=1):
         volume_status = "🔥 Active" if r["volume_active"] else "Normal"
 
         message += (
@@ -216,6 +226,8 @@ def main():
             f"52W Strength: {r['strength_52w']:.1%}\n"
             f"Return 6M: {r['return_6m']:.1%} vs IHSG {r['ihsg_return_6m']:.1%}\n"
             f"Volume: {r['volume_ratio']:.2f}x Avg 20D ({volume_status})\n"
+            f"Value Today: Rp{r['value_today'] / 1_000_000_000:.1f}B\n"
+            f"Avg Value 20D: Rp{r['avg_value_20d'] / 1_000_000_000:.1f}B\n"
         )
 
     message += (
