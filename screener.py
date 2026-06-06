@@ -188,52 +188,39 @@ def main():
 
     today = datetime.now().strftime("%d %b %Y")
 
-    if not results:
+        if not results:
         message = (
             f"📈 <b>LIVERMORE SCREENER - IDX</b>\n"
-            f"Tanggal: {today}\n\n"
-            f"Tidak ada saham yang lolos filter hari ini.\n\n"
-            f"Kriteria Wajib:\n"
-            f"✅ Close / High 52W ≥ 0.80\n"
-            f"✅ EMA50 > EMA150 > EMA200\n"
-            f"✅ Return 6 bulan > IHSG\n"
-            f"✅ Avg transaksi 20D > Rp10 miliar\n\n"
-            f"Info Tambahan:\n"
-            f"• Volume Ratio = Volume hari ini / Avg Volume 20D"
+            f"{today}\n\n"
+            f"Tidak ada saham yang lolos.\n\n"
+            f"Filter: 52W ≥80% | EMA50>150>200 | RS>IHSG | Avg Value20D>Rp10B"
         )
         send_telegram(message)
         return
 
     message = (
         f"📈 <b>LIVERMORE SCREENER - IDX</b>\n"
-        f"Tanggal: {today}\n\n"
-        f"Kriteria Wajib:\n"
-        f"✅ Close / High 52W ≥ 0.80\n"
-        f"✅ EMA50 > EMA150 > EMA200\n"
-        f"✅ Return 6 bulan > IHSG\n"
-        f"✅ Avg transaksi 20D > Rp10 miliar\n\n"
-        f"Info Tambahan:\n"
-        f"• Volume Ratio = Volume hari ini / Avg Volume 20D\n\n"
-        f"🏆 <b>Top Candidates:</b>\n"
+        f"{today}\n"
+        f"IHSG 6M: {ihsg_return_6m:.1%}\n\n"
+        f"<b>Ticker | Score | 52W | RS vs IHSG | Vol</b>\n"
     )
 
     for i, r in enumerate(results[:15], start=1):
-        volume_status = "🔥 Active" if r["volume_active"] else "Normal"
+        ticker_clean = r["ticker"].replace(".JK", "")
+        rs_vs_ihsg = r["return_6m"] - r["ihsg_return_6m"]
+        volume_icon = "🔥" if r["volume_active"] else ""
 
         message += (
-            f"\n{i}. <b>{r['ticker']}</b> | Score: {r['score']}\n"
-            f"Close: {r['close']:.0f}\n"
-            f"52W Strength: {r['strength_52w']:.1%}\n"
-            f"Return 6M: {r['return_6m']:.1%} vs IHSG {r['ihsg_return_6m']:.1%}\n"
-            f"Volume: {r['volume_ratio']:.2f}x Avg 20D ({volume_status})\n"
-            f"Value Today: Rp{r['value_today'] / 1_000_000_000:.1f}B\n"
-            f"Avg Value 20D: Rp{r['avg_value_20d'] / 1_000_000_000:.1f}B\n"
+            f"{i}. <b>{ticker_clean}</b> | "
+            f"{r['score']:.0f} | "
+            f"{r['strength_52w']:.0%} | "
+            f"{rs_vs_ihsg:+.1%} | "
+            f"{r['volume_ratio']:.1f}x {volume_icon}\n"
         )
 
     message += (
-        f"\nTotal lolos: {len(results)} saham\n\n"
-        f"Catatan: ini bukan rekomendasi beli/jual. "
-        f"Gunakan sebagai watchlist dan tunggu pivotal point/breakout."
+        f"\nTotal: {len(results)} saham\n"
+        f"Filter: 52W≥80%, EMA trend, RS>IHSG, Avg Value20D>Rp10B"
     )
 
     send_telegram(message)
