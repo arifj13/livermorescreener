@@ -99,18 +99,22 @@ def analyze_stock(ticker, ihsg_return_6m):
 
     avg_volume_20d = df["Volume"].rolling(20).mean().iloc[-1]
     volume_ratio = volume_today / avg_volume_20d if avg_volume_20d > 0 else 0
+    volume_active = volume_today > avg_volume_20d
 
     passed_52w = strength_52w >= MIN_52W_STRENGTH
     passed_ema = ema50 > ema150 > ema200
     passed_rs = stock_return_6m > ihsg_return_6m
-    passed_volume = volume_today > avg_volume_20d
 
-    if passed_52w and passed_ema and passed_rs and passed_volume:
+    # Filter wajib baru:
+    # 1. Close / High 52W >= 0.80
+    # 2. EMA50 > EMA150 > EMA200
+    # 3. Return 6 bulan > IHSG
+    if passed_52w and passed_ema and passed_rs:
         score = (
-            min(strength_52w / 1.0, 1) * 30 +
-            30 +
-            min((stock_return_6m - ihsg_return_6m) / 0.30, 1) * 25 +
-            min(volume_ratio / 2, 1) * 15
+            min(strength_52w / 1.0, 1) * 35 +
+            35 +
+            min((stock_return_6m - ihsg_return_6m) / 0.30, 1) * 20 +
+            min(volume_ratio / 2, 1) * 10
         )
 
         return {
@@ -121,6 +125,7 @@ def analyze_stock(ticker, ihsg_return_6m):
             "return_6m": stock_return_6m,
             "ihsg_return_6m": ihsg_return_6m,
             "volume_ratio": volume_ratio,
+            "volume_active": volume_active,
             "score": round(score, 1)
         }
 
@@ -171,11 +176,12 @@ def main():
             f"📈 <b>LIVERMORE SCREENER - IDX</b>\n"
             f"Tanggal: {today}\n\n"
             f"Tidak ada saham yang lolos filter hari ini.\n\n"
-            f"Kriteria:\n"
+            f"Kriteria Wajib:\n"
             f"✅ Close / High 52W ≥ 0.80\n"
             f"✅ EMA50 > EMA150 > EMA200\n"
-            f"✅ Return 6 bulan > IHSG\n"
-            f"✅ Volume hari ini > Avg Volume 20D"
+            f"✅ Return 6 bulan > IHSG\n\n"
+            f"Info Tambahan:\n"
+            f"• Volume Ratio = Volume hari ini / Avg Volume 20D"
         )
         send_telegram(message)
         return
@@ -183,21 +189,24 @@ def main():
     message = (
         f"📈 <b>LIVERMORE SCREENER - IDX</b>\n"
         f"Tanggal: {today}\n\n"
-        f"Kriteria:\n"
+        f"Kriteria Wajib:\n"
         f"✅ Close / High 52W ≥ 0.80\n"
         f"✅ EMA50 > EMA150 > EMA200\n"
-        f"✅ Return 6 bulan > IHSG\n"
-        f"✅ Volume hari ini > Avg Volume 20D\n\n"
+        f"✅ Return 6 bulan > IHSG\n\n"
+        f"Info Tambahan:\n"
+        f"• Volume Ratio = Volume hari ini / Avg Volume 20D\n\n"
         f"🏆 <b>Top Candidates:</b>\n"
     )
 
     for i, r in enumerate(results[:20], start=1):
+        volume_status = "🔥 Active" if r["volume_active"] else "Normal"
+
         message += (
             f"\n{i}. <b>{r['ticker']}</b> | Score: {r['score']}\n"
             f"Close: {r['close']:.0f}\n"
             f"52W Strength: {r['strength_52w']:.1%}\n"
             f"Return 6M: {r['return_6m']:.1%} vs IHSG {r['ihsg_return_6m']:.1%}\n"
-            f"Volume: {r['volume_ratio']:.2f}x Avg 20D\n"
+            f"Volume: {r['volume_ratio']:.2f}x Avg 20D ({volume_status})\n"
         )
 
     message += (
