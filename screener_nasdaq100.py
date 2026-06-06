@@ -44,25 +44,21 @@ def send_telegram(message: str):
 # =========================
 
 def load_nasdaq100_tickers():
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-
-    tables = pd.read_html(url)
-
-    tickers = []
-
-    for table in tables:
-        if "Ticker" in table.columns:
-            tickers = table["Ticker"].tolist()
-            break
-        elif "Symbol" in table.columns:
-            tickers = table["Symbol"].tolist()
-            break
-
-    tickers = [str(t).strip().replace(".", "-") for t in tickers if str(t).strip()]
+    tickers = [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "AVGO", "GOOGL", "GOOG", "TSLA", "COST",
+        "NFLX", "PLTR", "AMD", "CSCO", "TMUS", "LIN", "PEP", "ISRG", "INTU", "QCOM",
+        "BKNG", "TXN", "AMGN", "AMAT", "ADBE", "GILD", "HON", "VRTX", "PANW", "CMCSA",
+        "ADP", "MELI", "SBUX", "MU", "LRCX", "KLAC", "ADI", "CRWD", "CDNS", "SNPS",
+        "MAR", "CEG", "ORLY", "MDLZ", "REGN", "DASH", "CTAS", "PYPL", "ABNB", "FTNT",
+        "MRVL", "CSX", "WDAY", "ADSK", "ROP", "NXPI", "PCAR", "MNST", "CPRT", "PAYX",
+        "AEP", "ROST", "CHTR", "FAST", "KDP", "EXC", "AZN", "KHC", "MCHP", "EA",
+        "ODFL", "IDXX", "DDOG", "TTWO", "FANG", "BKR", "GEHC", "TEAM", "XEL", "CCEP",
+        "DXCM", "CTSH", "ZS", "ANSS", "ON", "BIIB", "GFS", "CDW", "MDB", "DLTR",
+        "TTD", "WBD", "ILMN", "MRNA", "SIRI", "WBA"
+    ]
 
     print(f"Total Nasdaq 100 tickers loaded: {len(tickers)}")
     return tickers
-
 
 def get_data(ticker):
     df = yf.download(
