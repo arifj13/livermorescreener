@@ -135,23 +135,32 @@ def main():
     print("Running Livermore Screener...")
 
     tickers = load_tickers()
+    print(f"Total tickers loaded: {len(tickers)}")
 
     ihsg_df = get_data(IHSG_TICKER)
     if ihsg_df is None:
+        print("Gagal mengambil data IHSG.")
         send_telegram("Gagal mengambil data IHSG dari yfinance.")
         return
 
     ihsg_return_6m = calculate_return_6m(ihsg_df)
+    print(f"IHSG return 6M: {ihsg_return_6m:.2%}")
 
     results = []
 
     for ticker in tickers:
+        print(f"Processing {ticker}...")
         try:
             result = analyze_stock(ticker, ihsg_return_6m)
             if result:
+                print(f"PASSED: {ticker}")
                 results.append(result)
+            else:
+                print(f"FAILED: {ticker}")
         except Exception as e:
-            print(f"Error processing {ticker}: {e}")
+            print(f"ERROR {ticker}: {e}")
+
+    print(f"Total passed: {len(results)}")
 
     results = sorted(results, key=lambda x: x["score"], reverse=True)
 
