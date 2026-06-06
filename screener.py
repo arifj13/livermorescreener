@@ -188,7 +188,7 @@ def main():
 
     today = datetime.now().strftime("%d %b %Y")
 
-        if not results:
+    if not results:
         message = (
             f"📈 <b>LIVERMORE SCREENER - IDX</b>\n"
             f"{today}\n\n"
