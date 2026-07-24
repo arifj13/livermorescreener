@@ -13,7 +13,8 @@ BENCHMARK_TICKER = "QQQ"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MIN_52W_STRENGTH = 0.85
+MIN_52W_STRENGTH = 0.80
+TOP_N = 20
 
 
 # =========================
@@ -193,7 +194,7 @@ def main():
             f"📈 <b>LIVERMORE SCREENER - NASDAQ100</b>\n"
             f"{today}\n\n"
             f"Tidak ada saham yang lolos.\n\n"
-            f"Filter: 52W ≥85% | EMA50>150>200 | RS>QQQ"
+            f"Filter: 52W ≥{MIN_52W_STRENGTH:.0%} | EMA50>150>200 | RS>QQQ"
         )
         send_telegram(message)
         return
@@ -205,7 +206,7 @@ def main():
         f"<b>Ticker | Score | 52W | RS vs QQQ | Vol</b>\n"
     )
 
-    for i, r in enumerate(results[:15], start=1):
+    for i, r in enumerate(results[:TOP_N], start=1):
         rs_vs_benchmark = r["return_6m"] - r["benchmark_return_6m"]
         volume_icon = "🔥" if r["volume_active"] else ""
 
@@ -219,7 +220,7 @@ def main():
 
     message += (
         f"\nTotal: {len(results)} saham\n"
-        f"Filter: 52W≥85%, EMA trend, RS>QQQ"
+        f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, EMA trend, RS>QQQ"
     )
 
     send_telegram(message)
