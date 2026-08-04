@@ -170,11 +170,15 @@ def calculate_daily_volatility(df, window=MOMENTUM_LOOKBACK):
     returns = df["Close"].pct_change().dropna()
     return returns.tail(window).std()
 
-
 def calculate_52w_strength(df):
-    high_52w = df["High"].tail(252).max()
+    high_52w = df["Close"].tail(252).max()  # pakai Close, bukan High — hindari kolom High yang rawan corrupt saat batch download
     close_now = df["Close"].iloc[-1]
     return close_now / high_52w, high_52w, close_now
+    
+#def calculate_52w_strength(df):
+#   high_52w = df["High"].tail(252).max()
+#   close_now = df["Close"].iloc[-1]
+#   return close_now / high_52w, high_52w, close_now
 
 
 # =========================
@@ -261,6 +265,16 @@ def main():
     print(f"Lolos RS filter saja: {count_rs}")
     print(f"SPY momentum 12-1: {benchmark_momentum:.2%}")
     # --- END DEBUG ---
+
+    # --- DEBUG TAMBAHAN: cek raw value kolom High ---
+    sample_tickers = ["AAPL", "MSFT", "NVDA"]
+    for t in sample_tickers:
+        if t in stock_data:
+            df_sample = stock_data[t]
+            print(f"{t} | High NaN count: {df_sample['High'].isna().sum()}/{len(df_sample)} | "
+                  f"High max 252d: {df_sample['High'].tail(252).max()} | "
+                  f"Close now: {df_sample['Close'].iloc[-1]}")
+    # --- END DEBUG TAMBAHAN ---
     
     results = []
     for ticker, df in stock_data.items():
