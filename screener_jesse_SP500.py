@@ -4,10 +4,12 @@ S&P 500 Momentum Screener (ala Livermore / academic momentum factor)
 Metodologi:
 - Universe   : S&P 500 (diambil otomatis, tidak di-hardcode)
 - Momentum   : 12 bulan, exclude 1 bulan terakhir (12-1), standar Jegadeesh & Titman (1993)
-- Filter     : 52-week high proximity >= 80% (George & Hwang, 2004)
-- Filter     : Relative strength (momentum 12-1 saham > momentum 12-1 SPY)
+- Filter     : 52-week high proximity >= 80% (George & Hwang, 2004), berbasis closing price
+- Filter     : Relative strength (momentum 12-1 saham > momentum 12-1 RSP)
 - Scoring    : Risk-adjusted momentum = momentum_12_1 / volatilitas harian (Barroso & Santa-Clara, 2015)
-- Output     : Top 20 saham, dikirim ke Telegram
+- Dedup      : Kelas saham ganda (mis. GOOGL/GOOG) disatukan, ambil skor tertinggi
+- Breakout   : Flag tambahan -> harga close hari ini bikin high baru N-hari + volume terkonfirmasi
+- Output     : Top 20 saham, dikirim ke Telegram, dengan penanda sinyal breakout
 
 Tidak memakai sector cap & market regime filter (disederhanakan sesuai kebutuhan).
 """
@@ -28,10 +30,13 @@ BENCHMARK_TICKER = "RSP"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MIN_52W_STRENGTH = 0.80     # min 80% dari 52-week high
+MIN_52W_STRENGTH = 0.80     # min 80% dari 52-week high (berbasis closing price)
 MOMENTUM_LOOKBACK = 252     # ~12 bulan trading days
 MOMENTUM_SKIP = 21          # exclude ~1 bulan terakhir
 MIN_HISTORY_DAYS = MOMENTUM_LOOKBACK + MOMENTUM_SKIP + 5  # buffer aman
+
+BREAKOUT_LOOKBACK = 20          # ~1 bulan trading days, jendela pembanding "high baru"
+BREAKOUT_VOLUME_THRESHOLD = 1.5 # volume hari ini vs rata-rata 20 hari
 
 TOP_N = 20
 BATCH_SIZE = 50             # jumlah ticker per batch download
@@ -41,6 +46,13 @@ SP500_SOURCES = [
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv",
     "https://raw.githubusercontent.com/Ate329/top-us-stock-tickers/main/tickers/sp500.csv",
 ]
+
+# Kelas saham ganda dari perusahaan yang sama -> canonical ticker yang dipertahankan
+DUPLICATE_SHARE_CLASSES = {
+    "GOOG": "GOOGL",   # Alphabet: pertahankan GOOGL (Class A)
+    "FOX": "FOXA",     # Fox Corp: pertahankan FOXA (Class A)
+    "NWS": "NWSA",     # News Corp: pertahankan NWSA (Class A)
+}
 
 
 # =========================
@@ -128,7 +140,7 @@ def download_batch(tickers, batch_size=BATCH_SIZE, delay=BATCH_DELAY):
             for t in batch:
                 try:
                     sub = df if len(batch) == 1 else df[t]
-                    sub = sub.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya
+                    sub = sub.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya (pre-market)
                     if not sub.empty and len(sub) >= MIN_HISTORY_DAYS:
                         all_data[t] = sub
                 except Exception:
@@ -149,7 +161,7 @@ def download_single(ticker):
         return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya
+    df = df.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya (pre-market)
     if len(df) < MIN_HISTORY_DAYS:
         return None
     return df
@@ -173,15 +185,57 @@ def calculate_daily_volatility(df, window=MOMENTUM_LOOKBACK):
     returns = df["Close"].pct_change().dropna()
     return returns.tail(window).std()
 
+
 def calculate_52w_strength(df):
-    high_52w = df["Close"].tail(252).max()  # pakai Close, bukan High — hindari kolom High yang rawan corrupt saat batch download
+    """Berbasis closing price (bukan intraday High) -> lebih stabil untuk batch download."""
+    high_52w = df["Close"].tail(252).max()
     close_now = df["Close"].iloc[-1]
     return close_now / high_52w, high_52w, close_now
-    
-#def calculate_52w_strength(df):
-#   high_52w = df["High"].tail(252).max()
-#   close_now = df["Close"].iloc[-1]
-#   return close_now / high_52w, high_52w, close_now
+
+
+def detect_breakout(df, lookback=BREAKOUT_LOOKBACK, volume_threshold=BREAKOUT_VOLUME_THRESHOLD):
+    """
+    Proxy sederhana untuk 'pivotal point breakout' ala Livermore:
+    - Close hari ini adalah yang TERTINGGI dibanding N hari sebelumnya (bukan termasuk hari ini)
+    - Dikonfirmasi oleh volume hari ini >= threshold x rata-rata volume 20 hari
+
+    Ini sinyal TIMING (kapan mulai perhatikan entry), berbeda dari filter 52W/momentum
+    yang menyaring KANDIDAT (saham apa yang layak dipantau).
+    """
+    if len(df) < lookback + 2:
+        return False, 0.0
+
+    close_now = df["Close"].iloc[-1]
+    recent_high = df["Close"].iloc[-lookback - 1:-1].max()  # N hari SEBELUM hari ini
+    is_new_high = close_now > recent_high
+
+    volume_today = df["Volume"].iloc[-1]
+    avg_volume_20d = df["Volume"].rolling(20).mean().iloc[-1]
+    volume_ratio = volume_today / avg_volume_20d if avg_volume_20d > 0 else 0
+    volume_confirmed = volume_ratio >= volume_threshold
+
+    return (is_new_high and volume_confirmed), volume_ratio
+
+
+# =========================
+# DEDUP KELAS SAHAM GANDA
+# =========================
+
+def dedupe_share_classes(results):
+    """
+    Kalau beberapa kelas saham dari perusahaan yang sama lolos filter (mis. GOOGL & GOOG),
+    simpan cuma satu -> canonical ticker. Karena `results` sudah ter-sort dari skor
+    tertinggi, entry pertama yang ditemui otomatis yang skornya tertinggi.
+    """
+    seen = set()
+    deduped = []
+    for r in results:
+        canonical = DUPLICATE_SHARE_CLASSES.get(r["ticker"], r["ticker"])
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        deduped.append(r)
+    return deduped
 
 
 # =========================
@@ -211,6 +265,7 @@ def analyze_stock(ticker, df, benchmark_momentum):
             return None
 
         risk_adj_score = momentum / volatility
+        is_breakout, breakout_volume_ratio = detect_breakout(df)
 
         return {
             "ticker": ticker,
@@ -222,6 +277,7 @@ def analyze_stock(ticker, df, benchmark_momentum):
             "rs_vs_benchmark": momentum - benchmark_momentum,
             "volume_ratio": volume_ratio,
             "score": risk_adj_score,
+            "is_breakout": is_breakout,
         }
 
     except Exception as e:
@@ -243,42 +299,22 @@ def main():
         send_telegram("⚠️ Screener gagal: tidak bisa load daftar S&P 500.")
         return
 
-    # Benchmark (SPY)
+    # Benchmark (RSP - equal weight, hindari bias mega-cap dari cap-weighted index)
     benchmark_df = download_single(BENCHMARK_TICKER)
     if benchmark_df is None:
-        send_telegram("⚠️ Screener gagal: tidak bisa ambil data SPY.")
+        send_telegram(f"⚠️ Screener gagal: tidak bisa ambil data {BENCHMARK_TICKER}.")
         return
 
     benchmark_momentum = calculate_momentum_12_1(benchmark_df)
     if benchmark_momentum is None:
-        send_telegram("⚠️ Screener gagal: data SPY tidak cukup panjang.")
+        send_telegram(f"⚠️ Screener gagal: data {BENCHMARK_TICKER} tidak cukup panjang.")
         return
 
-    print(f"SPY momentum 12-1: {benchmark_momentum:.2%}")
+    print(f"{BENCHMARK_TICKER} momentum 12-1: {benchmark_momentum:.2%}")
 
     # Data saham (batched)
     stock_data = download_batch(tickers)
-    
-    # --- DEBUG: cek funnel filter ---
-    count_52w = sum(1 for t, df in stock_data.items() 
-                    if calculate_52w_strength(df)[0] >= MIN_52W_STRENGTH)
-    count_rs = sum(1 for t, df in stock_data.items() 
-                   if (calculate_momentum_12_1(df) or -999) > benchmark_momentum)
-    print(f"Lolos 52W filter saja: {count_52w}")
-    print(f"Lolos RS filter saja: {count_rs}")
-    print(f"SPY momentum 12-1: {benchmark_momentum:.2%}")
-    # --- END DEBUG ---
 
-    # --- DEBUG TAMBAHAN: cek raw value kolom High ---
-    sample_tickers = ["AAPL", "MSFT", "NVDA"]
-    for t in sample_tickers:
-        if t in stock_data:
-            df_sample = stock_data[t]
-            print(f"{t} | High NaN count: {df_sample['High'].isna().sum()}/{len(df_sample)} | "
-                  f"High max 252d: {df_sample['High'].tail(252).max()} | "
-                  f"Close now: {df_sample['Close'].iloc[-1]}")
-    # --- END DEBUG TAMBAHAN ---
-    
     results = []
     for ticker, df in stock_data.items():
         result = analyze_stock(ticker, df, benchmark_momentum)
@@ -288,7 +324,10 @@ def main():
     print(f"Total lolos filter: {len(results)}")
 
     results = sorted(results, key=lambda x: x["score"], reverse=True)
+    results = dedupe_share_classes(results)
     top_results = results[:TOP_N]
+
+    breakout_stocks = [r for r in top_results if r["is_breakout"]]
 
     today = datetime.now().strftime("%d %b %Y")
 
@@ -297,7 +336,7 @@ def main():
             f"📈 <b>MOMENTUM SCREENER - S&amp;P 500</b>\n"
             f"{today}\n\n"
             f"Tidak ada saham yang lolos filter.\n\n"
-            f"Filter: 52W≥{MIN_52W_STRENGTH:.0%} | Momentum 12-1 > SPY ({benchmark_momentum:.1%})"
+            f"Filter: 52W≥{MIN_52W_STRENGTH:.0%} | Momentum 12-1 > {BENCHMARK_TICKER} ({benchmark_momentum:.1%})"
         )
         send_telegram(message)
         return
@@ -305,24 +344,43 @@ def main():
     message = (
         f"📈 <b>MOMENTUM SCREENER - S&amp;P 500</b>\n"
         f"{today}\n"
-        f"SPY Momentum 12-1: {benchmark_momentum:+.1%}\n"
-        f"Total lolos filter: {len(results)}\n\n"
-        f"<b>#  Ticker  Score  52W   Mom12-1  vs SPY</b>\n"
+        f"{BENCHMARK_TICKER} Momentum 12-1: {benchmark_momentum:+.1%}\n"
+        f"Total lolos filter: {len(results)}\n"
+    )
+
+    # Section khusus: sinyal breakout hari ini (actionable signal)
+    if breakout_stocks:
+        message += f"\n🎯 <b>BREAKOUT HARI INI ({len(breakout_stocks)}):</b>\n"
+        for r in breakout_stocks:
+            message += f"  • <b>{r['ticker']}</b> (vol {r['volume_ratio']:.1f}x)\n"
+    else:
+        message += "\n🎯 <i>Tidak ada breakout terdeteksi hari ini.</i>\n"
+
+    message += (
+        f"\n<b>#  Ticker  Score  52W   Mom12-1  vs {BENCHMARK_TICKER}</b>\n"
     )
 
     for i, r in enumerate(top_results, start=1):
-        volume_icon = "🔥" if r["volume_ratio"] > 1.5 else ""
+        if r["is_breakout"]:
+            signal_icon = "🎯"
+        elif r["volume_ratio"] > 1.5:
+            signal_icon = "🔥"
+        else:
+            signal_icon = ""
+
         message += (
             f"{i}. <b>{r['ticker']}</b> | "
             f"{r['score']:.1f} | "
             f"{r['strength_52w']:.0%} | "
             f"{r['momentum_12_1']:+.1%} | "
-            f"{r['rs_vs_benchmark']:+.1%} {volume_icon}\n"
+            f"{r['rs_vs_benchmark']:+.1%} {signal_icon}\n"
         )
 
     message += (
         f"\nScore = Momentum(12-1) / Volatilitas harian\n"
-        f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, Momentum 12-1 &gt; SPY"
+        f"🎯 = breakout hari ini (high {BREAKOUT_LOOKBACK}d baru + volume ≥{BREAKOUT_VOLUME_THRESHOLD}x)\n"
+        f"🔥 = volume tinggi tanpa breakout\n"
+        f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, Momentum 12-1 &gt; {BENCHMARK_TICKER}"
     )
 
     send_telegram(message)
