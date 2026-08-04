@@ -9,7 +9,12 @@ Metodologi:
 - Scoring    : Risk-adjusted momentum = momentum_12_1 / volatilitas harian (Barroso & Santa-Clara, 2015)
 - Dedup      : Kelas saham ganda (mis. GOOGL/GOOG) disatukan, ambil skor tertinggi
 - Breakout   : Flag tambahan -> harga close hari ini bikin high baru N-hari + volume terkonfirmasi
-- Output     : Top 20 saham, dikirim ke Telegram, dengan penanda sinyal breakout
+- Pullback   : Jalur screening TERPISAH -> saham pemenang (momentum > benchmark), sedang
+               koreksi ke rentang 52W 50%-95% dari puncak, tren jangka panjang masih utuh
+               (>MA200), dan dekat support MA20/50/100 (heuristik technical analysis, bukan
+               faktor akademis formal seperti komponen momentum utama -> WAJIB cek manual
+               chart tiap kandidat sebelum entry, daftar ini watchlist, bukan sinyal siap eksekusi)
+- Output     : Top 20 momentum + breakout flag + top 10 pullback setup, dikirim ke Telegram
 
 Tidak memakai sector cap & market regime filter (disederhanakan sesuai kebutuhan).
 """
@@ -37,6 +42,16 @@ MIN_HISTORY_DAYS = MOMENTUM_LOOKBACK + MOMENTUM_SKIP + 5  # buffer aman
 
 BREAKOUT_LOOKBACK = 20          # ~1 bulan trading days, jendela pembanding "high baru"
 BREAKOUT_VOLUME_THRESHOLD = 1.5 # volume hari ini vs rata-rata 20 hari
+
+# --- Config khusus pullback setup ---
+# Catatan: PULLBACK_MIN_52W bukan Fibonacci retracement sesungguhnya (yang dihitung dari
+# swing low ke swing high spesifik) -- ini proxy sederhana (close/52w_high). Floor 50%
+# artinya bisa menangkap saham yang sudah turun s/d 50% dari puncaknya -- jaring lebih
+# lebar, cek manual per saham sebelum entry.
+PULLBACK_MIN_52W = 0.50
+PULLBACK_MAX_52W = 0.95     # sudah pullback, bukan lagi nyaris di all-time-high
+MA_PROXIMITY_PCT = 0.04     # toleransi 4% dari MA20/50/100 untuk dianggap "dekat support"
+PULLBACK_TOP_N = 10         # batasi daftar pullback biar pesan tidak kepanjangan
 
 TOP_N = 20
 BATCH_SIZE = 50             # jumlah ticker per batch download
@@ -168,7 +183,7 @@ def download_single(ticker):
 
 
 # =========================
-# METRICS
+# METRICS - MOMENTUM & MAIN FILTER
 # =========================
 
 def calculate_momentum_12_1(df):
@@ -198,9 +213,6 @@ def detect_breakout(df, lookback=BREAKOUT_LOOKBACK, volume_threshold=BREAKOUT_VO
     Proxy sederhana untuk 'pivotal point breakout' ala Livermore:
     - Close hari ini adalah yang TERTINGGI dibanding N hari sebelumnya (bukan termasuk hari ini)
     - Dikonfirmasi oleh volume hari ini >= threshold x rata-rata volume 20 hari
-
-    Ini sinyal TIMING (kapan mulai perhatikan entry), berbeda dari filter 52W/momentum
-    yang menyaring KANDIDAT (saham apa yang layak dipantau).
     """
     if len(df) < lookback + 2:
         return False, 0.0
@@ -218,14 +230,73 @@ def detect_breakout(df, lookback=BREAKOUT_LOOKBACK, volume_threshold=BREAKOUT_VO
 
 
 # =========================
+# METRICS - PULLBACK SETUP
+# =========================
+
+def calculate_moving_averages(df):
+    ma20 = df["Close"].rolling(20).mean().iloc[-1]
+    ma50 = df["Close"].rolling(50).mean().iloc[-1]
+    ma100 = df["Close"].rolling(100).mean().iloc[-1]
+    ma200 = df["Close"].rolling(200).mean().iloc[-1]
+    return ma20, ma50, ma100, ma200
+
+
+def detect_pullback_setup(df, benchmark_momentum):
+    """
+    Jalur screening TERPISAH dari filter momentum utama (yang mensyaratkan 52W>=80%).
+    Saham yang sedang pullback wajar tidak akan lolos filter itu, makanya perlu logic sendiri.
+
+    Kriteria:
+    1. Tetap 'pemenang': momentum 12-1 > benchmark (sama seperti filter utama)
+    2. Sudah pullback: 52W strength di rentang PULLBACK_MIN_52W - PULLBACK_MAX_52W
+       (proxy close/52w_high, BUKAN Fibonacci retracement sesungguhnya -- lihat catatan di CONFIG)
+    3. Tren jangka panjang masih utuh: harga masih di atas MA200
+    4. Dekat support MA20/50/100 (radius MA_PROXIMITY_PCT)
+
+    Tidak ada syarat higher-low/pivot -- daftar hasil dimaksudkan untuk dicek manual
+    satu per satu (chart, konteks fundamental) sebelum dipertimbangkan entry.
+    """
+    momentum = calculate_momentum_12_1(df)
+    if momentum is None or momentum <= benchmark_momentum:
+        return None  # bukan 'pemenang' menurut definisi kita
+
+    strength_52w, high_52w, close_now = calculate_52w_strength(df)
+    if not (PULLBACK_MIN_52W <= strength_52w <= PULLBACK_MAX_52W):
+        return None
+
+    ma20, ma50, ma100, ma200 = calculate_moving_averages(df)
+    if pd.isna(ma200) or close_now < ma200:
+        return None  # tren jangka panjang sudah rusak, skip
+
+    near_ma = None
+    for label, ma_val in [("MA20", ma20), ("MA50", ma50), ("MA100", ma100)]:
+        if pd.notna(ma_val) and ma_val > 0 and abs(close_now - ma_val) / ma_val <= MA_PROXIMITY_PCT:
+            near_ma = label
+            break
+    if near_ma is None:
+        return None
+
+    volatility = calculate_daily_volatility(df)
+    if not volatility:
+        return None
+
+    return {
+        "close": close_now,
+        "strength_52w": strength_52w,
+        "momentum_12_1": momentum,
+        "near_ma": near_ma,
+        "score": momentum / volatility,
+    }
+
+
+# =========================
 # DEDUP KELAS SAHAM GANDA
 # =========================
 
 def dedupe_share_classes(results):
     """
     Kalau beberapa kelas saham dari perusahaan yang sama lolos filter (mis. GOOGL & GOOG),
-    simpan cuma satu -> canonical ticker. Karena `results` sudah ter-sort dari skor
-    tertinggi, entry pertama yang ditemui otomatis yang skornya tertinggi.
+    simpan cuma satu -> canonical ticker. `results` harus sudah ter-sort dari skor tertinggi.
     """
     seen = set()
     deduped = []
@@ -239,7 +310,7 @@ def dedupe_share_classes(results):
 
 
 # =========================
-# SCREENER LOGIC
+# SCREENER LOGIC - MOMENTUM UTAMA
 # =========================
 
 def analyze_stock(ticker, df, benchmark_momentum):
@@ -316,16 +387,28 @@ def main():
     stock_data = download_batch(tickers)
 
     results = []
+    pullback_candidates = []
+
     for ticker, df in stock_data.items():
         result = analyze_stock(ticker, df, benchmark_momentum)
         if result:
             results.append(result)
 
-    print(f"Total lolos filter: {len(results)}")
+        pullback = detect_pullback_setup(df, benchmark_momentum)
+        if pullback:
+            pullback["ticker"] = ticker
+            pullback_candidates.append(pullback)
+
+    print(f"Total lolos filter momentum: {len(results)}")
+    print(f"Total kandidat pullback setup: {len(pullback_candidates)}")
 
     results = sorted(results, key=lambda x: x["score"], reverse=True)
     results = dedupe_share_classes(results)
     top_results = results[:TOP_N]
+
+    pullback_candidates = sorted(pullback_candidates, key=lambda x: x["score"], reverse=True)
+    pullback_candidates = dedupe_share_classes(pullback_candidates)
+    top_pullback = pullback_candidates[:PULLBACK_TOP_N]
 
     breakout_stocks = [r for r in top_results if r["is_breakout"]]
 
@@ -335,7 +418,7 @@ def main():
         message = (
             f"📈 <b>MOMENTUM SCREENER - S&amp;P 500</b>\n"
             f"{today}\n\n"
-            f"Tidak ada saham yang lolos filter.\n\n"
+            f"Tidak ada saham yang lolos filter momentum.\n\n"
             f"Filter: 52W≥{MIN_52W_STRENGTH:.0%} | Momentum 12-1 > {BENCHMARK_TICKER} ({benchmark_momentum:.1%})"
         )
         send_telegram(message)
@@ -348,13 +431,24 @@ def main():
         f"Total lolos filter: {len(results)}\n"
     )
 
-    # Section khusus: sinyal breakout hari ini (actionable signal)
+    # Section: sinyal breakout hari ini (actionable signal)
     if breakout_stocks:
         message += f"\n🎯 <b>BREAKOUT HARI INI ({len(breakout_stocks)}):</b>\n"
         for r in breakout_stocks:
             message += f"  • <b>{r['ticker']}</b> (vol {r['volume_ratio']:.1f}x)\n"
     else:
         message += "\n🎯 <i>Tidak ada breakout terdeteksi hari ini.</i>\n"
+
+    # Section: pullback setup (higher low, dekat MA) -> watchlist tambahan, bukan sinyal langsung
+    if top_pullback:
+        message += f"\n📉 <b>PULLBACK SETUP - HIGHER LOW ({len(top_pullback)}):</b>\n"
+        for r in top_pullback:
+            message += (
+                f"  • <b>{r['ticker']}</b> | dekat {r['near_ma']} | "
+                f"52W:{r['strength_52w']:.0%} | Mom12-1:{r['momentum_12_1']:+.1%}\n"
+            )
+    else:
+        message += "\n📉 <i>Tidak ada setup pullback+higher low terdeteksi hari ini.</i>\n"
 
     message += (
         f"\n<b>#  Ticker  Score  52W   Mom12-1  vs {BENCHMARK_TICKER}</b>\n"
@@ -380,6 +474,7 @@ def main():
         f"\nScore = Momentum(12-1) / Volatilitas harian\n"
         f"🎯 = breakout hari ini (high {BREAKOUT_LOOKBACK}d baru + volume ≥{BREAKOUT_VOLUME_THRESHOLD}x)\n"
         f"🔥 = volume tinggi tanpa breakout\n"
+        f"📉 = pullback setup: cek chart manual sebelum entry\n"
         f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, Momentum 12-1 &gt; {BENCHMARK_TICKER}"
     )
 
