@@ -128,7 +128,7 @@ def download_batch(tickers, batch_size=BATCH_SIZE, delay=BATCH_DELAY):
             for t in batch:
                 try:
                     sub = df if len(batch) == 1 else df[t]
-                    sub = sub.dropna(how="all")
+                    sub = sub.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya
                     if not sub.empty and len(sub) >= MIN_HISTORY_DAYS:
                         all_data[t] = sub
                 except Exception:
@@ -145,10 +145,13 @@ def download_batch(tickers, batch_size=BATCH_SIZE, delay=BATCH_DELAY):
 
 def download_single(ticker):
     df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
-    if df.empty or len(df) < MIN_HISTORY_DAYS:
+    if df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    df = df.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya
+    if len(df) < MIN_HISTORY_DAYS:
+        return None
     return df
 
 
