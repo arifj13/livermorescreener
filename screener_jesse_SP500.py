@@ -23,7 +23,7 @@ from datetime import datetime
 # CONFIG
 # =========================
 
-BENCHMARK_TICKER = "SPY"
+BENCHMARK_TICKER = "RSP"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -251,7 +251,17 @@ def main():
 
     # Data saham (batched)
     stock_data = download_batch(tickers)
-
+    
+    # --- DEBUG: cek funnel filter ---
+    count_52w = sum(1 for t, df in stock_data.items() 
+                    if calculate_52w_strength(df)[0] >= MIN_52W_STRENGTH)
+    count_rs = sum(1 for t, df in stock_data.items() 
+                   if (calculate_momentum_12_1(df) or -999) > benchmark_momentum)
+    print(f"Lolos 52W filter saja: {count_52w}")
+    print(f"Lolos RS filter saja: {count_rs}")
+    print(f"SPY momentum 12-1: {benchmark_momentum:.2%}")
+    # --- END DEBUG ---
+    
     results = []
     for ticker, df in stock_data.items():
         result = analyze_stock(ticker, df, benchmark_momentum)
