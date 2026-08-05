@@ -4,12 +4,12 @@ Nasdaq 100 Momentum Screener (ala Livermore / academic momentum factor)
 Versi ini disamakan sepenuhnya dengan metodologi screener S&P 500:
 
 - Universe   : Nasdaq 100 (diambil otomatis, tidak di-hardcode)
-- Benchmark  : QQQE (Nasdaq-100 EQUAL WEIGHT) -- bukan QQQ (cap-weighted), supaya
+- Benchmark  : QQQ (Nasdaq-100 EQUAL WEIGHT) -- bukan QQQ (cap-weighted), supaya
                konsisten dengan alasan yang sama seperti pemilihan RSP di screener
                S&P 500: menghindari bar relative-strength yang bias ke mega-cap.
 - Momentum   : 12 bulan, exclude 1 bulan terakhir (12-1), standar Jegadeesh & Titman (1993)
 - Filter     : 52-week high proximity >= 80% (George & Hwang, 2004), berbasis closing price
-- Filter     : Relative strength (momentum 12-1 saham > momentum 12-1 QQQE)
+- Filter     : Relative strength (momentum 12-1 saham > momentum 12-1 QQQ)
 - Scoring    : Risk-adjusted momentum = momentum_12_1 / volatilitas harian (Barroso & Santa-Clara, 2015)
 - Dedup      : Kelas saham ganda (mis. GOOGL/GOOG) disatukan, ambil skor tertinggi
 - Breakout   : Flag tambahan -> harga close hari ini bikin high baru N-hari + volume terkonfirmasi
@@ -34,7 +34,7 @@ from datetime import datetime
 # CONFIG
 # =========================
 
-BENCHMARK_TICKER = "QQQE"   # Nasdaq-100 equal weight, hindari bias mega-cap dari QQQ cap-weighted
+BENCHMARK_TICKER = "QQQ"   # Nasdaq-100 equal weight, hindari bias mega-cap dari QQQ cap-weighted
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -62,8 +62,10 @@ BATCH_SIZE = 50             # jumlah ticker per batch download
 BATCH_DELAY = 2             # jeda antar batch (detik), hindari rate limit
 
 NDX100_SOURCES = [
-    "https://raw.githubusercontent.com/Gary-Strauss/nasdaq100-scraper/main/data/nasdaq100_constituents.csv",
     "https://yfiua.github.io/index-constituents/constituents-nasdaq100.csv",
+    # Catatan: source Gary-Strauss/nasdaq100-scraper dihapus per Agustus 2026 --
+    # README repo tersebut menunjuk ke path yang sudah tidak berlaku (404), kemungkinan
+    # repo di-rename tapi dokumentasinya belum di-update. yfiua terbukti stabil (101 ticker).
 ]
 
 # Kelas saham ganda dari perusahaan yang sama -> canonical ticker yang dipertahankan
@@ -174,16 +176,31 @@ def download_batch(tickers, batch_size=BATCH_SIZE, delay=BATCH_DELAY):
     return all_data
 
 
-def download_single(ticker):
-    df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
-    if df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya (pre-market)
-    if len(df) < MIN_HISTORY_DAYS:
-        return None
-    return df
+def download_single(ticker, max_retries=3, retry_delay=20):
+    """
+    Dipakai khusus untuk benchmark -- kalau ini gagal, SELURUH run mati (fail-fast by design).
+    Makanya dikasih retry+backoff, beda dengan ticker individual di batch yang cukup di-skip
+    kalau gagal.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.dropna(subset=["Close"])  # buang baris hari ini yang belum ada datanya (pre-market)
+                if len(df) >= MIN_HISTORY_DAYS:
+                    return df
+                print(f"Data {ticker} kepanjangan kurang ({len(df)} baris)")
+        except Exception as e:
+            print(f"Percobaan {attempt}/{max_retries} gagal untuk {ticker}: {e}")
+
+        if attempt < max_retries:
+            print(f"Retry download {ticker} dalam {retry_delay} detik...")
+            time.sleep(retry_delay)
+
+    print(f"Gagal download {ticker} setelah {max_retries} percobaan.")
+    return None
 
 
 # =========================
