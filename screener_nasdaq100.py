@@ -62,8 +62,8 @@ def send_telegram(message: str):
 # =========================
 
 DIAGNOSTIC_TARGETS = [
-    ("Wikipedia", "https://en.wikipedia.org/wiki/Nasdaq-100"),
-    ("GitHub Pages mirror", "https://yfiua.github.io/index-constituents/constituents-ndx.csv"),
+    ("Wikipedia API", "https://en.wikipedia.org/w/api.php?action=parse&page=Nasdaq-100&format=json&prop=text"),
+    ("GitHub Pages mirror", "https://yfiua.github.io/index-constituents/constituents-nasdaq100.csv"),
     ("Yahoo Finance", "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"),
     ("Telegram API", "https://api.telegram.org"),
 ]
@@ -118,32 +118,61 @@ def _clean_tickers(raw_tickers):
 
 
 def _load_from_wikipedia():
-    """Sumber utama: tabel komponen di halaman Wikipedia Nasdaq-100.
-    Wikipedia di-update editor begitu ada perubahan resmi dari Nasdaq
-    (penambahan/penghapusan konstituen), jadi ini source yang cukup up to date."""
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0 (livermore-screener/1.0)"}
-    resp = requests.get(url, headers=headers, timeout=20)
+    """Sumber utama: tabel komponen Nasdaq-100 di Wikipedia.
+
+    Dipakai lewat MediaWiki API resmi (action=parse) alih-alih fetch
+    langsung ke halaman biasa. Fetch langsung ke halaman kadang kena
+    soft-block/anti-bot dari IP datacenter (mis. Railway) yang tetap
+    balas status 200 tapi kontennya bukan artikel penuh, sehingga
+    parsing gagal walau statusnya "sukses". Lewat API JSON lebih
+    konsisten karena tidak melalui pipeline anti-bot yang sama."""
+    api_url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "parse",
+        "page": "Nasdaq-100",
+        "format": "json",
+        "prop": "text",
+        "redirects": 1,
+    }
+    headers = {"User-Agent": "Mozilla/5.0 (livermore-screener/1.0; contact: n/a)"}
+
+    resp = requests.get(api_url, params=params, headers=headers, timeout=20)
     resp.raise_for_status()
+    data = resp.json()
 
-    tables = pd.read_html(io.StringIO(resp.text))
+    if "error" in data:
+        raise ValueError(f"Wikipedia API error: {data['error']}")
 
-    # Cari tabel yang punya kolom "Ticker" (bukan tabel milestone/timeline lain)
+    html = data["parse"]["text"]["*"]
+    tables = pd.read_html(io.StringIO(html))
+
+    # Cari tabel yang punya kolom "Ticker" DAN "Company" (bukan tabel
+    # histori perubahan yang juga bisa mengandung kata "Ticker" di header
+    # bertingkat).
+    candidate_columns = []
     for df in tables:
         cols = [str(c).strip() for c in df.columns]
-        if "Ticker" in cols:
+        candidate_columns.append(cols[:6])  # simpan buat log jika gagal
+        if "Ticker" in cols and "Company" in cols:
             tickers = df["Ticker"].astype(str).tolist()
             tickers = _clean_tickers(tickers)
             if len(tickers) >= 90:  # sanity check, Nasdaq-100 ~ 100-102 anggota
                 return tickers
 
-    raise ValueError("Tabel konstituen dengan kolom 'Ticker' tidak ditemukan di halaman Wikipedia.")
+    # Kalau sampai sini berarti gagal -> log kolom2 tabel yang ditemukan
+    # supaya kelihatan di Railway logs kenapa gagal (struktur berubah? dsb.)
+    print(f"[debug] Jumlah tabel ditemukan: {len(tables)}")
+    for i, cols in enumerate(candidate_columns[:8]):
+        print(f"[debug] Tabel #{i} kolom: {cols}")
+
+    raise ValueError("Tabel komponen dengan kolom 'Ticker' + 'Company' tidak ditemukan.")
 
 
 def _load_from_github_mirror():
     """Sumber cadangan: mirror JSON/CSV dari yfiua/index-constituents,
-    di-update otomatis tiap bulan (biasanya tanggal 1)."""
-    url = "https://yfiua.github.io/index-constituents/constituents-ndx.csv"
+    di-update otomatis tiap bulan (biasanya tanggal 1). Kode index untuk
+    Nasdaq-100 di repo ini adalah 'nasdaq100' (bukan 'ndx')."""
+    url = "https://yfiua.github.io/index-constituents/constituents-nasdaq100.csv"
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
 
