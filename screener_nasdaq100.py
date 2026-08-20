@@ -58,6 +58,47 @@ def send_telegram(message: str):
 
 
 # =========================
+# NETWORK DIAGNOSTIC
+# =========================
+
+DIAGNOSTIC_TARGETS = [
+    ("Wikipedia", "https://en.wikipedia.org/wiki/Nasdaq-100"),
+    ("GitHub Pages mirror", "https://yfiua.github.io/index-constituents/constituents-ndx.csv"),
+    ("Yahoo Finance", "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"),
+    ("Telegram API", "https://api.telegram.org"),
+]
+
+
+def check_network():
+    """Cek konektivitas ke semua domain yang dipakai script ini.
+    Hasilnya di-print ke log (Railway Deploy Logs) supaya begitu ada
+    ticker yang error/basi, kita langsung tahu domain mana yang bermasalah
+    tanpa perlu deploy terpisah untuk diagnostik."""
+    print("=" * 50)
+    print("NETWORK CHECK")
+    print("=" * 50)
+
+    results = {}
+    for name, url in DIAGNOSTIC_TARGETS:
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (livermore-screener/1.0)"},
+                timeout=10,
+            )
+            ok = 200 <= resp.status_code < 300
+            results[name] = ok
+            icon = "✅" if ok else "⚠️"
+            print(f"{icon} {name}: status {resp.status_code}")
+        except Exception as e:
+            results[name] = False
+            print(f"❌ {name}: GAGAL - {type(e).__name__}: {e}")
+
+    print("=" * 50)
+    return results
+
+
+# =========================
 # DATA HELPER
 # =========================
 
@@ -120,24 +161,27 @@ def _load_from_github_mirror():
 
 def load_nasdaq100_tickers():
     """Ambil daftar konstituen Nasdaq-100 terkini secara otomatis.
-    Urutan sumber: Wikipedia -> mirror GitHub -> fallback list statis (basi)."""
+    Urutan sumber: Wikipedia -> mirror GitHub -> fallback list statis (basi).
+
+    Return: (tickers, source_label) supaya caller bisa log/tampilkan
+    sumber mana yang benar-benar dipakai pada run ini."""
 
     try:
         tickers = _load_from_wikipedia()
         print(f"Total Nasdaq 100 tickers loaded dari Wikipedia: {len(tickers)}")
-        return tickers
+        return tickers, "Wikipedia"
     except Exception as e:
         print(f"Gagal ambil ticker dari Wikipedia: {e}")
 
     try:
         tickers = _load_from_github_mirror()
         print(f"Total Nasdaq 100 tickers loaded dari mirror GitHub: {len(tickers)}")
-        return tickers
+        return tickers, "GitHub mirror"
     except Exception as e:
         print(f"Gagal ambil ticker dari mirror GitHub: {e}")
 
     print(f"⚠️ Semua sumber online gagal. Pakai fallback list statis ({len(FALLBACK_TICKERS)} ticker, mungkin sudah basi).")
-    return FALLBACK_TICKERS
+    return FALLBACK_TICKERS, "FALLBACK STATIS (basi)"
 
 
 def get_data(ticker):
@@ -237,7 +281,10 @@ def analyze_stock(ticker, benchmark_return_6m):
 def main():
     print("Running Livermore Screener - Nasdaq 100...")
 
-    tickers = load_nasdaq100_tickers()
+    check_network()
+
+    tickers, ticker_source = load_nasdaq100_tickers()
+    print(f"Sumber ticker yang dipakai run ini: {ticker_source}")
 
     benchmark_df = get_data(BENCHMARK_TICKER)
     if benchmark_df is None:
@@ -268,12 +315,15 @@ def main():
 
     today = datetime.now().strftime("%d %b %Y")
 
+    source_warning = f"\n⚠️ Sumber ticker: {ticker_source}" if ticker_source != "Wikipedia" else ""
+
     if not results:
         message = (
             f"📈 <b>LIVERMORE SCREENER - NASDAQ100</b>\n"
             f"{today}\n\n"
             f"Tidak ada saham yang lolos.\n\n"
             f"Filter: 52W ≥{MIN_52W_STRENGTH:.0%} | EMA50>150>200 | RS>QQQ"
+            f"{source_warning}"
         )
         send_telegram(message)
         return
@@ -300,6 +350,7 @@ def main():
     message += (
         f"\nTotal: {len(results)} saham\n"
         f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, EMA trend, RS>QQQ"
+        f"{source_warning}"
     )
 
     send_telegram(message)
