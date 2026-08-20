@@ -17,6 +17,24 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 MIN_52W_STRENGTH = 0.80
 TOP_N = 20
 
+# =========================
+# BOBOT SCORING
+# =========================
+# Total selalu 100. Direvisi dari versi awal karena RS vs QQQ (sinyal inti
+# strategi momentum/Livermore) terlalu diremehkan: bobotnya kecil (15) DAN
+# cepat saturasi di cap 30pp, sehingga saham dgn RS +72% dan +119% dapat
+# skor RS yang nyaris sama. EMA-passing bonus (35, fixed) tidak diubah jadi
+# bergradasi berdasarkan lebar EMA, karena itu akan mengunggulkan saham yang
+# sudah "extended" (naik lurus tanpa jeda) dan menghukum saham yang sedang
+# konsolidasi sehat sebelum breakout -- bertentangan dengan konsep pivotal
+# point ala Livermore. Jadi EMA tetap fixed, cuma bobotnya dikurangi supaya
+# tidak mendominasi skor.
+WEIGHT_52W = 40          # kedekatan ke 52-week high
+WEIGHT_EMA_PASS = 20     # bonus fixed untuk lolos filter EMA50>150>200 (turun dari 35)
+WEIGHT_RS = 30           # relative strength vs QQQ (naik dari 15)
+RS_SATURATION_PP = 0.75  # excess return utk skor RS penuh: 75pp (naik dari 30pp)
+WEIGHT_VOLUME = 10       # rasio volume vs rata-rata 20 hari
+
 # Fallback ticker list dipakai HANYA jika semua sumber online gagal diakses
 # (mis. tidak ada koneksi internet sama sekali). Boleh basi, karena ini
 # jalur darurat terakhir, bukan sumber utama.
@@ -273,10 +291,10 @@ def analyze_stock(ticker, benchmark_return_6m):
 
     if passed_52w and passed_ema and passed_rs:
         score = (
-            min(strength_52w / 1.0, 1) * 40 +
-            35 +
-            min((stock_return_6m - benchmark_return_6m) / 0.30, 1) * 15 +
-            min(volume_ratio / 2, 1) * 10
+            min(strength_52w / 1.0, 1) * WEIGHT_52W +
+            WEIGHT_EMA_PASS +
+            min((stock_return_6m - benchmark_return_6m) / RS_SATURATION_PP, 1) * WEIGHT_RS +
+            min(volume_ratio / 2, 1) * WEIGHT_VOLUME
         )
 
         return {
