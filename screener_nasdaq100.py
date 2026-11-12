@@ -231,7 +231,17 @@ def load_nasdaq100_tickers():
     return FALLBACK_TICKERS, "FALLBACK STATIS (basi)"
 
 
+PRICE_COLUMNS = ["Open", "High", "Low", "Close"]
+
+
 def get_data(ticker):
+    """Download data harian 2 tahun dan bersihkan bar yang rusak.
+
+    REVISI: dengan auto_adjust=True, yfinance menyesuaikan harga memakai
+    Adj Close. Kalau Yahoo belum mengisi Adj Close untuk bar terbaru,
+    seluruh OHLC di bar itu jadi NaN sementara Volume tetap terisi.
+    Bar seperti itu dibuang supaya tidak meracuni perhitungan
+    (52W strength, return 6M, EMA)."""
     df = yf.download(
         ticker,
         period="2y",
@@ -240,36 +250,66 @@ def get_data(ticker):
         progress=False
     )
 
-    if df.empty or len(df) < 220:
+    if df is None or df.empty:
         return None
 
+    # Ratakan kolom MultiIndex DULU sebelum akses kolom per nama
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    missing_cols = [c for c in PRICE_COLUMNS + ["Volume"] if c not in df.columns]
+    if missing_cols:
+        print(f"[warn] {ticker}: kolom hilang {missing_cols}")
+        return None
+
+    rows_before = len(df)
+    df = df.dropna(subset=PRICE_COLUMNS)
+    dropped = rows_before - len(df)
+    if dropped > 0:
+        print(f"[warn] {ticker}: {dropped} bar dengan harga NaN dibuang")
+
+    if len(df) < 220:
+        return None
 
     return df
 
 
 def calculate_return_6m(df):
+    if len(df) < 126:
+        return float("nan")
     close_now = df["Close"].iloc[-1]
     close_6m = df["Close"].iloc[-126]
     return (close_now / close_6m) - 1
+
+
+def _is_valid_number(x):
+    return x is not None and not pd.isna(x)
 
 
 # =========================
 # SCREENER LOGIC
 # =========================
 
-def analyze_stock(ticker, benchmark_return_6m):
+def analyze_stock(ticker, benchmark_return_6m, benchmark_last_date):
     df = get_data(ticker)
 
     if df is None:
-        return None
+        print(f"{ticker} SKIP | data kosong/kurang dari 220 bar")
+        return None, "no_data"
+
+    last_date = df.index[-1].date()
+
+    # Data saham tertinggal dari QQQ -> bandingkan apel dengan jeruk.
+    # Tetap dianalisis, tapi ditandai supaya kelihatan di log & Telegram.
+    is_stale = last_date < benchmark_last_date
+    if is_stale:
+        print(f"[warn] {ticker}: bar terakhir {last_date} tertinggal dari QQQ ({benchmark_last_date})")
 
     close = df["Close"].iloc[-1]
     volume_today = df["Volume"].iloc[-1]
 
     high_52w = df["High"].tail(252).max()
-    strength_52w = close / high_52w
+    strength_52w = close / high_52w if high_52w > 0 else float("nan")
 
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
     df["EMA150"] = df["Close"].ewm(span=150, adjust=False).mean()
@@ -282,8 +322,26 @@ def analyze_stock(ticker, benchmark_return_6m):
     stock_return_6m = calculate_return_6m(df)
 
     avg_volume_20d = df["Volume"].rolling(20).mean().iloc[-1]
-    volume_ratio = volume_today / avg_volume_20d if avg_volume_20d > 0 else 0
-    volume_active = volume_today > avg_volume_20d
+    if _is_valid_number(avg_volume_20d) and avg_volume_20d > 0 and _is_valid_number(volume_today):
+        volume_ratio = volume_today / avg_volume_20d
+    else:
+        volume_ratio = 0
+    volume_active = volume_ratio > 1
+
+    # Guard: kalau masih ada NaN di angka kunci, jangan diam-diam dianggap
+    # "gagal filter" -- tandai sebagai data invalid supaya kelihatan.
+    key_values = {
+        "close": close,
+        "high_52w": high_52w,
+        "ema50": ema50,
+        "ema150": ema150,
+        "ema200": ema200,
+        "return_6m": stock_return_6m,
+    }
+    invalid = [k for k, v in key_values.items() if not _is_valid_number(v)]
+    if invalid:
+        print(f"{ticker} SKIP | data invalid (NaN): {invalid}")
+        return None, "invalid"
 
     passed_52w = strength_52w >= MIN_52W_STRENGTH
     passed_ema = ema50 > ema150 > ema200
@@ -306,8 +364,10 @@ def analyze_stock(ticker, benchmark_return_6m):
             "benchmark_return_6m": benchmark_return_6m,
             "volume_ratio": volume_ratio,
             "volume_active": volume_active,
+            "last_date": last_date,
+            "is_stale": is_stale,
             "score": round(score, 1)
-        }
+        }, "passed"
 
     print(
         f"{ticker} CHECK | "
@@ -318,7 +378,7 @@ def analyze_stock(ticker, benchmark_return_6m):
         f"VOL: {volume_ratio:.2f}x"
     )
 
-    return None
+    return None, "failed"
 
 
 # =========================
@@ -336,67 +396,101 @@ def main():
     benchmark_df = get_data(BENCHMARK_TICKER)
     if benchmark_df is None:
         print("Gagal mengambil data QQQ.")
-        send_telegram("Gagal mengambil data QQQ dari yfinance.")
+        send_telegram("⚠️ Gagal mengambil data QQQ dari yfinance. Screener dibatalkan.")
         return
 
+    print("[debug] 3 bar terakhir QQQ:")
+    print(benchmark_df.tail(3))
+
     benchmark_return_6m = calculate_return_6m(benchmark_df)
-    print(f"QQQ return 6M: {benchmark_return_6m:.2%}")
+    benchmark_last_date = benchmark_df.index[-1].date()
+    data_date_str = benchmark_df.index[-1].strftime("%d %b %Y")
+
+    # REVISI: kalau return QQQ NaN, semua perbandingan RS otomatis False
+    # dan hasilnya "tidak ada saham lolos" yang menyesatkan. Batalkan saja.
+    if not _is_valid_number(benchmark_return_6m):
+        print("Return 6M QQQ = NaN. Screener dibatalkan.")
+        send_telegram(
+            "⚠️ <b>LIVERMORE SCREENER</b>\n"
+            "Return 6M QQQ = NaN (data yfinance rusak). "
+            "Screener dibatalkan supaya tidak mengirim hasil palsu."
+        )
+        return
+
+    print(f"QQQ return 6M: {benchmark_return_6m:.2%} (bar terakhir: {benchmark_last_date})")
 
     results = []
+    status_count = {"passed": 0, "failed": 0, "invalid": 0, "no_data": 0, "error": 0}
 
     for ticker in tickers:
         print(f"Processing {ticker}...")
         try:
-            result = analyze_stock(ticker, benchmark_return_6m)
+            result, status = analyze_stock(ticker, benchmark_return_6m, benchmark_last_date)
+            status_count[status] += 1
             if result:
                 print(f"PASSED: {ticker}")
                 results.append(result)
             else:
                 print(f"FAILED: {ticker}")
         except Exception as e:
+            status_count["error"] += 1
             print(f"ERROR {ticker}: {e}")
 
     print(f"Total passed: {len(results)}")
+    print(f"Ringkasan status: {status_count}")
 
     results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-    today = datetime.now().strftime("%d %b %Y")
+    run_time = datetime.now().strftime("%d %b %Y %H:%M")
 
     source_warning = f"\n⚠️ Sumber ticker: {ticker_source}" if ticker_source != "Wikipedia" else ""
 
+    bad_data = status_count["invalid"] + status_count["no_data"] + status_count["error"]
+    data_warning = (
+        f"\n⚠️ {bad_data} dari {len(tickers)} ticker datanya tidak valid/kosong/error"
+        if bad_data > 0 else ""
+    )
+
+    header = (
+        f"📈 <b>LIVERMORE SCREENER - NASDAQ100</b>\n"
+        f"Data close: {data_date_str}\n"
+        f"Run: {run_time}\n"
+        f"QQQ 6M: {benchmark_return_6m:.1%}\n\n"
+    )
+
     if not results:
         message = (
-            f"📈 <b>LIVERMORE SCREENER - NASDAQ100</b>\n"
-            f"{today}\n\n"
+            header +
             f"Tidak ada saham yang lolos.\n\n"
             f"Filter: 52W ≥{MIN_52W_STRENGTH:.0%} | EMA50>150>200 | RS>QQQ"
+            f"{data_warning}"
             f"{source_warning}"
         )
         send_telegram(message)
         return
 
-    message = (
-        f"📈 <b>LIVERMORE SCREENER - NASDAQ100</b>\n"
-        f"{today}\n"
-        f"QQQ 6M: {benchmark_return_6m:.1%}\n\n"
-        f"<b>Ticker | Score | 52W | RS vs QQQ | Vol</b>\n"
-    )
+    message = header + f"<b>Ticker | Score | 52W | RS vs QQQ | Vol</b>\n"
 
     for i, r in enumerate(results[:TOP_N], start=1):
         rs_vs_benchmark = r["return_6m"] - r["benchmark_return_6m"]
         volume_icon = "🔥" if r["volume_active"] else ""
+        stale_icon = " ⏳" if r["is_stale"] else ""
 
         message += (
-            f"{i}. <b>{r['ticker']}</b> | "
+            f"{i}. <b>{r['ticker']}</b>{stale_icon} | "
             f"{r['score']:.0f} | "
             f"{r['strength_52w']:.0%} | "
             f"{rs_vs_benchmark:+.1%} | "
             f"{r['volume_ratio']:.1f}x {volume_icon}\n"
         )
 
+    stale_note = "\n⏳ = data saham tertinggal dari QQQ" if any(r["is_stale"] for r in results[:TOP_N]) else ""
+
     message += (
         f"\nTotal: {len(results)} saham\n"
         f"Filter: 52W≥{MIN_52W_STRENGTH:.0%}, EMA trend, RS>QQQ"
+        f"{stale_note}"
+        f"{data_warning}"
         f"{source_warning}"
     )
 
